@@ -1,0 +1,860 @@
+## load packages 
+
+library(ggplot2)
+library(dplyr)
+library(Rmisc)
+library(cowplot)
+library(MuMIn)
+
+temps<-read.csv("./data/measured_temperatures.csv")
+
+## read in data
+cn<-read.csv("./data/C_N_fungal_biomass.csv")
+cn<-cn[cn$keep.for.analysis=="yes",] ## 3 chambers had visual signs of issues at end of experiment. see notes column
+
+
+p<-read.csv("./data/p_concentration_extracted_biomass.csv")
+
+
+filter<-read.csv("./data/liquid_media_filter_volumes.csv")
+
+filter<-merge(filter,temps,by="Temperature")
+
+DOC<-read.csv("./data/processed_DOC_consumed.csv")
+
+Boltz<-8.6173303*10**-5 ## boltzmann constant
+
+#### Total volumes remaining differed by temperature due to evaporation - this matters for growth and CUE calcs
+#### because biomass of species D was low, the total volume was filtered at each temperature. Using this to
+#### correct volumes of all treatments
+
+total.volume<-filter[filter$Species=="D",]
+total.volume$total.vol<-total.volume$CN.volume.filtered..mL.+total.volume$P.volume.filtered..mL.
+
+final.flask.volumes<-aggregate(total.vol~Temperature,data=total.volume,mean)
+
+filter<-merge(filter,final.flask.volumes,by="Temperature")
+
+
+#### Turing percents into masses of C and N
+
+
+cn$mass.c.mg<-cn$sample.weight.mg*(cn$percent.C/100)
+cn$mass.n.mg<-cn$sample.weight.mg*(cn$percent.n/100)
+
+############# working up p data
+
+p$mg.p<-p$Total.P.as.PO4.P..ppm./1000 ## extracted in 1 mL of acid this yields the mg of P as PO4.P
+
+#### summarize CN data (Filters had to be split to fit in the machine) summing total weights of C and N
+#### averaging isotope ratios
+
+mass.c<-aggregate(mass.c.mg~ID.number,cn,sum)
+
+mass.n<-aggregate(mass.n.mg~ID.number,cn,sum)
+
+mean.c.delta<-aggregate(delta.13.C~ID.number,cn,mean)
+
+mean.n.delta<-aggregate(delta.15.n~ID.number,cn,mean)
+
+
+############### merging all data files together
+
+d<-merge(filter,p,by="ID.number")
+d<-merge(d,mass.c,by="ID.number",all.x=TRUE)
+d<-merge(d,mass.n,by="ID.number",all.x=TRUE)
+d<-merge(d,mean.c.delta,by="ID.number",all.x=TRUE)
+d<-merge(d,mean.n.delta,by="ID.number",all.x=TRUE)
+
+# recoding to the letters to be the names of the species
+d$species_name<-recode_factor(as.factor(d$Species),"B"="Articulospora tetracladia",
+                              "C"="Hydrocina chaectocladia","A"="Flagellospora sp.","D"="Aquanectria penicilloiides",
+                              "MIX"="Community")
+
+## converting to masses in the chamber
+d$total.p.mg<-d$mg.p/d$P.volume.filtered..mL.*d$total.vol # converting from concentraitons to masses
+d$total.c.mg<-d$mass.c.mg/d$CN.volume.filtered..mL.*d$total.vol
+d$total.n.mg<-d$mass.n.mg/d$CN.volume.filtered..mL.*d$total.vol
+
+
+# converting to molar ratios
+d$molar.c.n<-(d$total.c.mg/12)/(d$total.n.mg/12) # molar ratios
+d$molar.c.p<-(d$total.c.mg/12)/(d$total.p.mg/31)
+
+d<-d[d$Species!="Control",] # dropping control
+
+################## Function for finding the maximum value of quadratic models
+
+peak_seek<-function(quadratic_model){
+  temps<-seq(0,20,by=0.1)
+  temps.kt<-1/((273+12)*Boltz)-1/((temps+273)*Boltz)
+  df<-data.frame(temps,temps.kt,model.fit=NA)
+  df$model.fit<-coef(quadratic_model)[1]+coef(quadratic_model)[2]*df$temps.kt+coef(quadratic_model)[3]*df$temps.kt**2
+  out<-df[df$model.fit==max(df$model.fit),"temps"]
+  print(out)
+}
+
+
+################## Making Plots #####################################
+
+d2<-d
+
+d2$Temperature<-d2$measured_temperature
+
+d2$jitter.temp<-d2$Temperature # jittering tempeature for plots
+d2$temp.kt<-1/((273+12)*Boltz)-1/((d2$Temperature+273)*Boltz)
+
+
+
+
+d2[d2$species_name=="Articulospora tetracladia","jitter.temp"]<-d2[d2$species_name=="Articulospora tetracladia","Temperature"]+0.4
+d2[d2$species_name=="Hydrocina chaectocladia","jitter.temp"]<-d2[d2$species_name=="Articulospora tetracladia","Temperature"]+0.2
+d2[d2$species_name=="Flagellospora sp.","jitter.temp"]<-d2[d2$species_name=="Articulospora tetracladia","Temperature"]-0.4
+d2[d2$species_name=="Aquanectria penicilloiides","jitter.temp"]<-d2[d2$species_name=="Articulospora tetracladia","Temperature"]-0.2
+
+d2$jitter.temp.kt<-1/((273+12)*Boltz)-1/((d2$jitter.temp+273)* Boltz)
+
+####### growth first
+
+Boltz<-8.6173303*10**-5 ## boltzmann constant
+
+d2$log.growth<-log(d2$total.c.mg)
+
+d2<-d2[d2$ID.number!=15,] ## visually a big outlier
+
+c.sum<-summarySE(measurevar = "total.c.mg",groupvars = c("species_name","jitter.temp.kt","jitter.temp"),data=d2,na.rm=TRUE)
+
+#cbp1 <- c("#999999", "#E69F00", "#56B4E9", "#009E73",
+#          "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+
+cbp1 <- c("#999999", "#E69F00", "#009E73",
+          "#D55E00", "#56B4E9")
+
+########## Growth in units of carbon
+
+#### modeling growth as a function of temperature
+
+d2$quad.temp<-d2$temp.kt**2
+
+
+
+AT.model<-lm(log(total.c.mg)~temp.kt,d2[d2$species_name=="Articulospora tetracladia",])
+AT.model.quad<-lm(log(total.c.mg)~temp.kt+quad.temp,d2[d2$species_name=="Articulospora tetracladia",])
+AT.model.null<-lm(log(total.c.mg)~1,d2[d2$species_name=="Articulospora tetracladia",])
+AICc(AT.model,AT.model.quad,AT.model.null) ## quad is better
+summary(AT.model.quad)
+peak_seek(AT.model.quad)
+
+HC.model<-lm(log(total.c.mg)~temp.kt,d2[d2$species_name=="Hydrocina chaectocladia",])
+HC.model.quad<-lm(log(total.c.mg)~temp.kt+quad.temp,d2[d2$species_name=="Hydrocina chaectocladia",])
+HC.model.null<-lm(log(total.c.mg)~1,d2[d2$species_name=="Hydrocina chaectocladia",])
+AICc(HC.model,HC.model.quad,HC.model.null) ## quad is much better
+summary(HC.model.quad)
+peak_seek(HC.model.quad)
+
+FL.model<-lm(log(total.c.mg)~temp.kt,d2[d2$species_name=="Flagellospora sp.",])
+FL.model.quad<-lm(log(total.c.mg)~temp.kt+quad.temp,d2[d2$species_name=="Flagellospora sp.",])
+FL.model.null<-lm(log(total.c.mg)~1,d2[d2$species_name=="Flagellospora sp.",])
+AICc(FL.model,FL.model.quad,FL.model.null) ## quad is better
+summary(FL.model.quad)
+
+
+AP.model<-lm(log(total.c.mg)~temp.kt,d2[d2$species_name=="Aquanectria penicilloiides",])
+AP.model.quad<-lm(log(total.c.mg)~temp.kt+quad.temp,d2[d2$species_name=="Aquanectria penicilloiides",])
+AP.model.null<-lm(log(total.c.mg)~1,d2[d2$species_name=="Aquanectria penicilloiides",])
+AICc(AP.model,AP.model.quad,AP.model.null) ## quad is better, but my less than two - so exponential is best
+summary(AP.model)
+
+
+mix.model<-lm(log(total.c.mg)~temp.kt,d2[d2$species_name=="Community",])
+mix.model.quad<-lm(log(total.c.mg)~temp.kt+quad.temp,d2[d2$species_name=="Community",])
+mix.model.null<-lm(log(total.c.mg)~1,d2[d2$species_name=="Community",])
+AICc(mix.model,mix.model.quad,mix.model.null) ## quad is much better
+summary(mix.model.quad)
+peak_seek(mix.model.quad)
+
+
+species<-levels(as.factor(d2$species_name))
+
+dummy<-data.frame(temp=rep(seq(4,20,by=0.5),time=5),species_name=rep(species[1:5],each=33))
+dummy$temp.kt<-1/((273+12)*Boltz)-1/((dummy$temp+273)* Boltz)
+dummy$temp.quad<-dummy$temp.kt**2
+dummy$fit<-NA
+
+dummy[dummy$species_name=="Community","fit"]<-dummy[dummy$species_name=="Community","temp.kt"]*coef(mix.model.quad)[2]+
+  coef(mix.model.quad)[1]+dummy[dummy$species_name=="Community","temp.quad"]*coef(mix.model.quad)[3]
+
+dummy[dummy$species_name=="Aquanectria penicilloiides","fit"]<-dummy[dummy$species_name=="Aquanectria penicilloiides","temp.kt"]*coef(AP.model)[2]+
+  coef(AP.model)[1]
+
+dummy[dummy$species_name=="Flagellospora sp.","fit"]<-dummy[dummy$species_name=="Flagellospora sp.","temp.kt"]*coef(FL.model.quad)[2]+
+  coef(FL.model.quad)[1]+dummy[dummy$species_name=="Flagellospora sp.","temp.quad"]*coef(FL.model.quad)[3]
+
+dummy[dummy$species_name=="Hydrocina chaectocladia","fit"]<-dummy[dummy$species_name=="Hydrocina chaectocladia","temp.kt"]*coef(HC.model.quad)[2]+
+  coef(HC.model.quad)[1]+dummy[dummy$species_name=="Hydrocina chaectocladia","temp.quad"]*coef(HC.model.quad)[3]
+
+dummy[dummy$species_name=="Articulospora tetracladia","fit"]<-dummy[dummy$species_name=="Articulospora tetracladia","temp.kt"]*coef(AT.model.quad)[2]+
+  coef(AT.model.quad)[1]+dummy[dummy$species_name=="Articulospora tetracladia","temp.quad"]*coef(AT.model.quad)[3]
+
+c.sum$species_name<-as.character(c.sum$species_name)
+c.sum$species_name<-as.factor(c.sum$species_name)
+c.sum$species_name<-factor(c.sum$species_name,levels=c("Articulospora tetracladia","Hydrocina chaectocladia","Flagellospora sp.",        
+"Aquanectria penicilloiides", "Community"))
+
+
+growth_kt<-ggplot(c.sum,aes(x=jitter.temp.kt,y=total.c.mg))+theme_classic()+
+  scale_y_log10(limits=c(0.01,7))+
+  geom_errorbar(aes(ymin=total.c.mg-ci,ymax=total.c.mg+ci,color=species_name),width=0.001)+
+  geom_point(size=5,aes(color=species_name,shape=species_name))+
+  scale_colour_manual(values=cbp1,name = expression(""),
+                      labels = c(expression(italic("A. tetracladia")), 
+                                 expression(italic("H. chaetocladia")),
+                                 expression(italic("Flagellospora ")*"sp."),
+                                 expression(italic("A. penicillioides")),
+                                 "4-species assemblage"))+
+  scale_shape_manual(values=c(15, 16, 17,2,1),name = expression(""),
+                      labels = c(expression(italic("A. tetracladia")), 
+                                 expression(italic("H. chaetocladia")),
+                                 expression(italic("Flagellospora ")*"sp."),
+                                 expression(italic("A. penicillioides")),
+                                 "4-species assemblage"))+
+  #scale_colour_manual(values=cbp1)+
+  #scale_shape_manual(values=c(15, 16, 17,2,1))+
+  #scale_x_continuous(sec.axis=sec_axis(~1/(Boltz*(273+12))-1/((.+273)*Boltz),
+  #                                     name=expression("Standardized temperature "*"(1/["*italic("kT")[12]-italic(kT) *"])")))+
+  scale_x_continuous(sec.axis=sec_axis(~-273+(273+12)/(1-(273+12)*Boltz*.),
+                        name=expression("Temperature ("^o*"C)")))+
+  
+  
+  #xlab(expression("Temperature ("^o*"C)"))+
+  xlab("")+
+  ylab("Biomass accrual (mg C)")+
+  theme(text =element_text(size=20))+
+  theme(legend.position = c(0.8,0.2))+
+  #theme(legend.position = "none")+
+  geom_line(data=dummy,aes(x=temp.kt,y=exp(fit),color=species_name),size=2,alpha=0.5)
+growth_kt
+
+
+
+
+compare.model<-lm(log(total.c.mg)~temp.kt*species_name+quad.temp*species_name,d2)
+anova(compare.model)
+summary(compare.model)
+
+
+
+########### Carbon Use Efficiency
+
+CUE<-merge(d2,DOC,by="ID.number")
+
+CUE$aprox.CUE<-CUE$total.c.mg/CUE$DOC.consumed.mg
+CUE$log.CUE<-log(CUE$aprox.CUE)
+
+#### 
+
+CUE.sum<-summarySE(CUE,measurevar = "aprox.CUE",groupvars=c("jitter.temp.kt","species_name"),na.rm=TRUE)
+
+
+CUE$quad.temp<-CUE$temp.kt**2
+
+AT.model<-lm(log.CUE~temp.kt,CUE[CUE$species_name=="Articulospora tetracladia",])
+AT.model.quad<-lm(log.CUE~temp.kt+quad.temp,CUE[CUE$species_name=="Articulospora tetracladia",])
+AT.model.null<-lm(log.CUE~1,CUE[CUE$species_name=="Articulospora tetracladia",])
+AICc(AT.model,AT.model.quad,AT.model.null)## quad is much better
+summary(AT.model.quad)
+peak_seek(AT.model.quad) ## peaks at 8 C
+
+HC.model<-lm(log.CUE~temp.kt,CUE[CUE$species_name=="Hydrocina chaectocladia",])
+HC.model.quad<-lm(log.CUE~temp.kt+quad.temp,CUE[CUE$species_name=="Hydrocina chaectocladia",])
+HC.model.null<-lm(log.CUE~1,CUE[CUE$species_name=="Hydrocina chaectocladia",])
+AICc(HC.model,HC.model.quad,HC.model.null) ## quad is better
+summary(HC.model.quad)
+peak_seek(HC.model.quad) ## 14.7
+
+FL.model<-lm(log.CUE~temp.kt,CUE[CUE$species_name=="Flagellospora sp.",])
+FL.model.quad<-lm(log.CUE~temp.kt+quad.temp,CUE[CUE$species_name=="Flagellospora sp.",])
+FL.model.null<-lm(log.CUE~1,CUE[CUE$species_name=="Flagellospora sp.",])
+AICc(FL.model,FL.model.quad,FL.model.null) ## quad is better
+summary(FL.model.quad)
+peak_seek(FL.model.quad) # zero.. has a minimum not max
+
+AP.model<-lm(log.CUE~temp.kt,CUE[CUE$species_name=="Aquanectria penicilloiides",])
+AP.model.quad<-lm(log.CUE~temp.kt+quad.temp,CUE[CUE$species_name=="Aquanectria penicilloiides",])
+AP.model.null<-lm(log.CUE~1,CUE[CUE$species_name=="Aquanectria penicilloiides",])
+AICc(AP.model,AP.model.quad,AP.model.null) ## exponential is better
+summary(AP.model)
+
+
+mix.model<-lm(log.CUE~temp.kt,CUE[CUE$species_name=="Community",])
+mix.model.quad<-lm(log.CUE~temp.kt+quad.temp,CUE[CUE$species_name=="Community",])
+mix.model.null<-lm(log.CUE~1,CUE[CUE$species_name=="Community",])
+AICc(mix.model,mix.model.quad,mix.model.null) ## quad is better
+summary(mix.model.quad)
+peak_seek(mix.model.quad) ## peak at 12.8
+
+
+dummy<-data.frame(temp=rep(seq(4,20,by=0.5),time=5),species_name=rep(species[1:5],each=33))
+dummy$temp.kt<-1/((273+12)*Boltz)-1/((dummy$temp+273)* Boltz)
+dummy$temp.quad<-dummy$temp.kt**2
+dummy$fit<-NA
+
+dummy[dummy$species_name=="Community","fit"]<-dummy[dummy$species_name=="Community","temp.kt"]*coef(mix.model.quad)[2]+
+  coef(mix.model.quad)[1]+dummy[dummy$species_name=="Community","temp.quad"]*coef(mix.model.quad)[3]
+
+dummy[dummy$species_name=="Aquanectria penicilloiides","fit"]<-dummy[dummy$species_name=="Aquanectria penicilloiides","temp.kt"]*coef(AP.model)[2]+
+  coef(AP.model)[1]
+
+dummy[dummy$species_name=="Flagellospora sp.","fit"]<-dummy[dummy$species_name=="Flagellospora sp.","temp.kt"]*coef(FL.model.quad)[2]+
+  coef(FL.model.quad)[1]+dummy[dummy$species_name=="Flagellospora sp.","temp.quad"]*coef(FL.model.quad)[3]
+
+dummy[dummy$species_name=="Hydrocina chaectocladia","fit"]<-dummy[dummy$species_name=="Hydrocina chaectocladia","temp.kt"]*coef(HC.model.quad)[2]+
+  coef(HC.model.quad)[1]+dummy[dummy$species_name=="Hydrocina chaectocladia","temp.quad"]*coef(HC.model.quad)[3]
+
+dummy[dummy$species_name=="Articulospora tetracladia","fit"]<-dummy[dummy$species_name=="Articulospora tetracladia","temp.kt"]*coef(AT.model.quad)[2]+
+  coef(AT.model.quad)[1]+dummy[dummy$species_name=="Articulospora tetracladia","temp.quad"]*coef(AT.model.quad)[3]
+
+CUE.sum<-CUE.sum[CUE.sum$species_name!="Control",]
+CUE.sum$species_name<-as.character(CUE.sum$species_name)
+CUE.sum$species_name<-as.factor(CUE.sum$species_name)
+CUE.sum$species_name<-factor(CUE.sum$species_name,levels=c("Articulospora tetracladia","Hydrocina chaectocladia","Flagellospora sp.",        
+                                                         "Aquanectria penicilloiides", "Community"))
+
+CUE_kt<-ggplot(CUE.sum,aes(x=jitter.temp.kt,y=aprox.CUE))+theme_classic()+
+  geom_errorbar(aes(ymin=aprox.CUE-ci,ymax=aprox.CUE+ci,color=species_name),width=0.001)+
+  geom_point(size=5,aes(color=species_name,shape=species_name))+
+  #scale_colour_manual(values=cbp1,name = expression("Species"),
+  #                    labels = c(expression(italic("A. tetracladia")), 
+  #                               expression(italic("H. chaetocladia")),
+  #                               expression(italic("Flagellospora ")*"sp."),
+  #                               expression(italic("A. penicillioides")),
+  #                               "Assemblage"))+
+  #scale_shape_manual(values=c(15, 16, 17,2,1),name = expression("Species"),
+  #                    labels = c(expression(italic("A. tetracladia")), 
+  #                               expression(italic("H. chaetocladia")),
+  #                               expression(italic("Flagellospora ")*"sp."),
+  #                               expression(italic("A. penicillioides")),
+  #                               "Assemblage"))+
+  scale_colour_manual(values=cbp1)+
+  #scale_x_continuous(sec.axis=sec_axis(~1/(Boltz*(273+12))-1/((.+273)*Boltz),
+  #                                     name="",labels=NULL))+
+  scale_x_continuous(sec.axis=sec_axis(~-273+(273+12)/(1-(273+12)*Boltz*.),
+                                       name="",labels=NULL))+
+  scale_shape_manual(values=c(15, 16, 17,2,1))+
+  #scale_shape_manual(values=c(15, 16, 17,2,1))+
+  #scale_colour_manual(values=cbp1)+
+  xlab(expression("Standardized temperature "*"(1/["*italic("kT")[12]-italic(kT) *"])"))+
+  ylab("Carbon use efficiency")+
+  theme(text =element_text(size=20))+
+  theme(legend.position = "none")+
+  scale_y_log10()+
+  geom_line(data=dummy,aes(x=temp.kt,y=exp(fit),color=species_name),size=2,alpha=0.5)
+CUE_kt
+
+
+
+tiff(filename="./figures/new_growth_CUE.tiff",units="in",res=600,width=8,height=14,compression="lzw")
+plot_grid(growth_kt,CUE_kt,labels="AUTO",ncol = 1,label_x=0.95,label_y=0.95,label_size = 20,align=T)
+dev.off()
+
+####### C:N ratio
+
+d2$log.cn<-log(d2$molar.c.n)
+
+cn.sum<-summarySE(measurevar = "molar.c.n",groupvars = c("species_name","jitter.temp.kt"),data=d2,na.rm=TRUE)
+
+taxa.with.data<-c("Articulospora tetracladia","Hydrocina chaectocladia","Community")
+
+cn.sum.plot<-cn.sum[cn.sum$species_name %in% taxa.with.data,]
+
+cbp2 <- c("#999999", "#E69F00", "#56B4E9")
+
+
+
+# models
+
+AT.model<-lm(log(molar.c.n)~temp.kt,d2[d2$species_name=="Articulospora tetracladia",])
+AT.model.quad<-lm(log(molar.c.n)~temp.kt+quad.temp,d2[d2$species_name=="Articulospora tetracladia",])
+AT.model.null<-lm(log(molar.c.n)~1,d2[d2$species_name=="Articulospora tetracladia",])
+AICc(AT.model,AT.model.quad,AT.model.null) # exponential is better
+summary(AT.model)
+
+HC.model<-lm(log(molar.c.n)~temp.kt,d2[d2$species_name=="Hydrocina chaectocladia",])
+HC.model.quad<-lm(log(molar.c.n)~temp.kt+quad.temp,d2[d2$species_name=="Hydrocina chaectocladia",])
+HC.model.null<-lm(log(molar.c.n)~1,d2[d2$species_name=="Hydrocina chaectocladia",])
+AICc(HC.model,HC.model.quad,HC.model.null) ## quad is much better
+summary(HC.model.quad)
+
+mix.model<-lm(log(molar.c.n)~temp.kt,d2[d2$species_name=="Community",])
+mix.model.quad<-lm(log(molar.c.n)~temp.kt+quad.temp,d2[d2$species_name=="Community",])
+mix.model.null<-lm(log(molar.c.n)~1,d2[d2$species_name=="Community",])
+AICc(mix.model,mix.model.quad,mix.model.null) ## quad is much better
+summary(mix.model.quad)
+peak_seek(mix.model.quad) #peak at 12.3
+
+dummy<-data.frame(temp=rep(seq(4,20,by=0.5),time=5),species_name=rep(species[1:5],each=33))
+dummy$temp.kt<-1/((273+12)*Boltz)-1/((dummy$temp+273)* Boltz)
+dummy$temp.quad<-dummy$temp.kt**2
+dummy$fit<-NA
+
+dummy[dummy$species_name=="Community","fit"]<-dummy[dummy$species_name=="Community","temp.kt"]*coef(mix.model.quad)[2]+
+  coef(mix.model.quad)[1]+dummy[dummy$species_name=="Community","temp.quad"]*coef(mix.model.quad)[3]
+
+dummy[dummy$species_name=="Hydrocina chaectocladia","fit"]<-dummy[dummy$species_name=="Hydrocina chaectocladia","temp.kt"]*coef(HC.model.quad)[2]+
+  coef(HC.model.quad)[1]+dummy[dummy$species_name=="Hydrocina chaectocladia","temp.quad"]*coef(HC.model.quad)[3]
+
+dummy[dummy$species_name=="Articulospora tetracladia","fit"]<-dummy[dummy$species_name=="Articulospora tetracladia","temp.kt"]*coef(AT.model)[2]+
+  coef(AT.model)[1]
+
+dummy.HC<-dummy[dummy$species_name=="Hydrocina chaectocladia",]
+dummry.rest<-dummy[dummy$species_name!="Hydrocina chaectocladia",]
+
+dummy.HC<-dummy.HC[dummy.HC$temp>7.9,]
+
+dummy<-rbind(dummy.HC,dummry.rest)
+
+cn_ratio.kt<-ggplot(cn.sum.plot,aes(x=jitter.temp.kt,y=molar.c.n))+
+  scale_y_log10()+
+  geom_point(size=5,aes(color=species_name,shape=species_name))+theme_classic()+
+  geom_errorbar(aes(ymin=molar.c.n-ci,ymax=molar.c.n+ci,color=species_name),width=0.001)+
+  #xlab(expression("Inverse Temperature (1/kT"[0]-1/kT*")"))+
+  xlab("")+
+  #scale_x_continuous(sec.axis=sec_axis(~1/(Boltz*(273+12))-1/((.+273)*Boltz),
+  #                                     name=expression("Standardized temperature "*"(1/["*italic("kT")[12]-italic(kT) *"])")))+
+  scale_x_continuous(sec.axis=sec_axis(~-273+(273+12)/(1-(273+12)*Boltz*.),
+                                       name=expression("Temperature ("^o*"C)")))+
+  ylab("Biomass C:N")+
+  theme(text =element_text(size=20))+
+  theme(legend.position = c(0.8,0.15))+
+  scale_colour_manual(values=cbp2,name = expression(""),
+                      labels = c(expression(italic("A. tetracladia")),
+                                 expression(italic("H. chaetocladia")),"4-species assemblage"))+
+  scale_shape_manual(values=c(15, 16, 1),name = expression(""),
+                     labels = c(expression(italic("A. tetracladia")),
+                                expression(italic("H. chaetocladia")),"4-species assemblage"))+
+  geom_line(data=dummy[dummy$species_name %in% taxa.with.data,],aes(x=temp.kt,y=exp(fit),color=species_name),size=2,alpha=0.5)
+cn_ratio.kt
+
+################################
+
+
+####### C:P ratio
+
+d2$log.cp<-log(d2$molar.c.p)
+
+cp.sum<-summarySE(measurevar = "molar.c.p",groupvars = c("species_name","jitter.temp.kt"),data=d2,na.rm=TRUE)
+
+taxa.with.data<-c("Articulospora tetracladia","Hydrocina chaectocladia","Community")
+
+cp.sum.plot<-cp.sum[cp.sum$species_name %in% taxa.with.data,]
+
+## models
+AT.model<-lm(log.cp~temp.kt,d2[d2$species_name=="Articulospora tetracladia",])
+AT.model.quad<-lm(log.cp~temp.kt+quad.temp,d2[d2$species_name=="Articulospora tetracladia",])
+AT.model.null<-lm(log.cp~1,d2[d2$species_name=="Articulospora tetracladia",])
+AICc(AT.model,AT.model.quad,AT.model.null) ##null
+summary(AT.model.null)
+
+HC.model<-lm(log.cp~temp.kt,d2[d2$species_name=="Hydrocina chaectocladia",])
+HC.model.quad<-lm(log.cp~temp.kt+quad.temp,d2[d2$species_name=="Hydrocina chaectocladia",])
+HC.model.null<-lm(log.cp~1,d2[d2$species_name=="Hydrocina chaectocladia",])
+AICc(HC.model,HC.model.quad,HC.model.null) ## quadratic is better
+summary(HC.model.quad)
+
+mix.model<-lm(log.cp~temp.kt,d2[d2$species_name=="Community",])
+mix.model.quad<-lm(log.cp~temp.kt+quad.temp,d2[d2$species_name=="Community",])
+mix.model.null<-lm(log.cp~1,d2[d2$species_name=="Community",])
+AICc(mix.model,mix.model.quad,mix.model.null) ## null
+summary(mix.model.null)
+
+dummy<-data.frame(temp=rep(seq(4,20,by=0.5),time=5),species_name=rep(species[1:5],each=33))
+dummy$temp.kt<-1/((273+12)*Boltz)-1/((dummy$temp+273)* Boltz)
+dummy$temp.quad<-dummy$temp.kt**2
+dummy$fit<-NA
+
+dummy[dummy$species_name=="Community","fit"]<-NA
+
+dummy[dummy$species_name=="Hydrocina chaectocladia","fit"]<-dummy[dummy$species_name=="Hydrocina chaectocladia","temp.kt"]*coef(HC.model.quad)[2]+
+  coef(HC.model.quad)[1]+dummy[dummy$species_name=="Hydrocina chaectocladia","temp.quad"]*coef(HC.model.quad)[3]
+
+dummy[dummy$species_name=="Articulospora tetracladia","fit"]<-NA
+
+dummy.HC<-dummy[dummy$species_name=="Hydrocina chaectocladia",]
+dummry.rest<-dummy[dummy$species_name!="Hydrocina chaectocladia",]
+
+dummy.HC<-dummy.HC[dummy.HC$temp>7.9,]
+
+dummy<-rbind(dummy.HC,dummry.rest)
+
+cp_ratio_kt<-ggplot(cp.sum.plot,aes(x=jitter.temp.kt,y=molar.c.p,color=species_name))+
+  scale_y_log10()+
+  geom_point(size=5,aes(color=species_name,shape=species_name))+theme_classic()+
+  geom_errorbar(aes(ymin=molar.c.p-ci,ymax=molar.c.p+ci,color=species_name),width=0.001)+
+  xlab(expression("Standardized temperature "*"(1/["*italic("kT")[12]-italic(kT) *"])"))+
+  ylab("Biomass C:P")+
+  theme(text =element_text(size=20))+
+  theme(legend.position = "none")+
+  scale_colour_manual(values=cbp2,name = expression("Species"),
+                      labels = c(expression(italic("A. tetracladia")),
+                                 expression(italic("H. chaetocladia")),"4-species assemblage"))+
+  scale_shape_manual(values=c(15, 16, 1),name = expression("Species"),
+                     labels = c(expression(italic("A. tetracladia")),
+                                expression(italic("H. chaetocladia")),"4-species assemblage"))+
+  #scale_x_continuous(sec.axis=sec_axis(~1/(Boltz*(273+12))-1/((.+273)*Boltz),
+  #                                     name="",labels=NULL))+
+  scale_x_continuous(sec.axis=sec_axis(~-273+(273+12)/(1-(273+12)*Boltz*.),
+                                       name="",labels=NULL))+
+  
+  geom_line(data=dummy[dummy$species_name %in% taxa.with.data,],aes(x=temp.kt,y=exp(fit),color=species_name),size=2,alpha=0.5)
+cp_ratio_kt
+
+
+tiff(filename="./figures/nutrient_use_effeciency.tiff",units="in",res=600,width=8,height=14,compression="lzw")
+plot_grid(cn_ratio.kt,cp_ratio_kt,labels="AUTO",ncol = 1,label_x=0.95,label_y=0.95,label_size = 20,align=T)
+dev.off()
+
+
+
+####### C isotopes
+
+c.iso<-summarySE(measurevar = "delta.13.C",groupvars = c("species_name","jitter.temp.kt"),data=d2,na.rm=TRUE)
+
+taxa.with.data<-c("Articulospora tetracladia","Hydrocina chaectocladia","Community")
+
+c.iso.sum.plot<-c.iso[c.iso$species_name %in% taxa.with.data,]
+
+## models
+
+AT.model<-lm(delta.13.C~temp.kt,CUE[CUE$species_name=="Articulospora tetracladia",])
+AT.model.quad<-lm(delta.13.C~temp.kt+quad.temp,CUE[CUE$species_name=="Articulospora tetracladia",])
+AT.model.null<-lm(delta.13.C~1,CUE[CUE$species_name=="Articulospora tetracladia",])
+AICc(AT.model,AT.model.quad,AT.model.null)## exponential is best
+summary(AT.model.quad)
+
+HC.model<-lm(delta.13.C~temp.kt,CUE[CUE$species_name=="Hydrocina chaectocladia",])
+HC.model.quad<-lm(delta.13.C~temp.kt+quad.temp,CUE[CUE$species_name=="Hydrocina chaectocladia",])
+HC.model.null<-lm(delta.13.C~1,CUE[CUE$species_name=="Hydrocina chaectocladia",])
+AICc(HC.model,HC.model.quad,HC.model.null) ## null is better
+summary(HC.model.null)
+
+FL.model<-lm(delta.13.C~temp.kt,CUE[CUE$species_name=="Flagellospora sp.",])
+FL.model.quad<-lm(delta.13.C~temp.kt+quad.temp,CUE[CUE$species_name=="Flagellospora sp.",])
+FL.model.null<-lm(delta.13.C~1,CUE[CUE$species_name=="Flagellospora sp.",])
+AICc(FL.model,FL.model.quad,FL.model.null) ## exponential is better
+summary(FL.model)
+
+AP.model<-lm(delta.13.C~temp.kt,CUE[CUE$species_name=="Aquanectria penicilloiides",])
+AP.model.quad<-lm(delta.13.C~temp.kt+quad.temp,CUE[CUE$species_name=="Aquanectria penicilloiides",])
+AP.model.null<-lm(delta.13.C~1,CUE[CUE$species_name=="Aquanectria penicilloiides",])
+AICc(AP.model,AP.model.quad,AP.model.null) ## null is best
+summary(AP.model.null)
+
+mix.model<-lm(delta.13.C~temp.kt,CUE[CUE$species_name=="Community",])
+mix.model.quad<-lm(delta.13.C~temp.kt+quad.temp,CUE[CUE$species_name=="Community",])
+mix.model.null<-lm(delta.13.C~1,CUE[CUE$species_name=="Community",])
+AICc(mix.model,mix.model.quad,mix.model.null) ## quad is better
+summary(mix.model.quad)
+
+
+
+dummy<-data.frame(temp=rep(seq(4,20,by=0.5),time=5),species_name=rep(species[1:5],each=33))
+dummy$temp.kt<-1/((273+12)*Boltz)-1/((dummy$temp+273)* Boltz)
+dummy$temp.quad<-dummy$temp.kt**2
+dummy$fit<-NA
+
+dummy[dummy$species_name=="Community","fit"]<-dummy[dummy$species_name=="Community","temp.kt"]*coef(mix.model.quad)[2]+
+  coef(mix.model.quad)[1]+dummy[dummy$species_name=="Community","temp.quad"]*coef(mix.model.quad)[3]
+
+dummy[dummy$species_name=="Aquanectria penicilloiides","fit"]<-NA
+dummy[dummy$species_name=="Flagellospora sp.","fit"]<-dummy[dummy$species_name=="Flagellospora sp.","temp.kt"]*coef(FL.model)[2]+
+  coef(FL.model)[1]
+
+dummy[dummy$species_name=="Hydrocina chaectocladia","fit"]<-NA
+
+dummy[dummy$species_name=="Articulospora tetracladia","fit"]<-dummy[dummy$species_name=="Articulospora tetracladia","temp.kt"]*coef(AT.model)[2]+
+  coef(AT.model)[1]
+
+
+
+substrate<-cn[cn$ID.number>104,]
+
+c_iso_plot<-ggplot(c.iso,aes(x=jitter.temp.kt,y=delta.13.C,color=species_name))+
+  theme_classic()+
+  geom_errorbar(aes(ymin=delta.13.C-ci,ymax=delta.13.C+ci,color=species_name),width=0.001)+
+  geom_point(size=5,aes(color=species_name,shape=species_name))+
+  #scale_x_continuous(sec.axis=sec_axis(~1/(Boltz*(273+12))-1/((.+273)*Boltz),
+  #                                     name=expression("Standardized temperature "*"(1/["*italic("kT")[12]-italic(kT) *"])")))+
+  scale_x_continuous(sec.axis=sec_axis(~-273+(273+12)/(1-(273+12)*Boltz*.),
+                                       name=expression("Temperature ("^o*"C)")))+
+  
+  
+  scale_colour_manual(values=cbp1,name = expression(""),
+                      labels = c(expression(italic("A. tetracladia")), 
+                                 expression(italic("H. chaetocladia")),
+                                 expression(italic("Flagellospora ")*"sp."),
+                                 expression(italic("A. penicillioides")),
+                                 "4-species assemblage"))+
+  scale_shape_manual(values=c(15, 16, 17,2,1),name = expression(""),
+                     labels = c(expression(italic("A. tetracladia")), 
+                                expression(italic("H. chaetocladia")),
+                                expression(italic("Flagellospora ")*"sp."),
+                                expression(italic("A. penicillioides")),
+                                "4-species assemblage"))+
+  #scale_colour_manual(values=cbp1)+
+  #scale_shape_manual(values=c(15, 16, 17,2,1))+
+  #xlab(expression("Temperature (1/kT"[0]-1/kT*")"))+
+  xlab(expression("Standardized temperature "*"(1/["*italic("kT")[12]-italic(kT) *"])"))+
+  #xlab("")+
+  ylab(expression(delta^13*"C"))+
+  theme(text =element_text(size=20))+
+  theme(legend.position = c(0.25,0.2))+
+  #theme(legend.position = "none")+
+  geom_line(data=dummy,aes(x=temp.kt,y=fit,color=species_name),size=2,alpha=0.5)+
+  geom_hline(yintercept = mean(substrate$delta.13.C),linetype="dashed",size=2)
+c_iso_plot
+
+
+tiff(filename="./figures/cisotopes.tiff",units="in",res=600,width=8,height=8,compression="lzw")
+c_iso_plot
+dev.off()
+
+
+#################### Comparing community to mix of monocultures
+
+
+community<-d2[d2$species_name=="Community",]
+mono<-d2[d2$species_name!="Community",]
+mono<-d2[d2$species_name!="Aquanectria penicilloiides",]
+
+mono.growth<-summarySE(mono,measurevar = "total.c.mg",groupvars="Temperature",na.rm=TRUE)
+community.growth<-summarySE(community,measurevar = "total.c.mg",groupvars="Temperature",na.rm=TRUE)
+names(mono.growth)[names(mono.growth) == "total.c.mg"] <- "monoculture.growth"
+names(community.growth)[names(community.growth) == "total.c.mg"] <- "community.growth"
+
+
+growth.compare<-merge(community.growth,mono.growth,by="Temperature") 
+
+community.growth<-ggplot(growth.compare,aes(x=monoculture.growth,y=community.growth,color=Temperature))+
+  geom_point(size=6)+
+  scale_color_gradient2(low="navy", mid="gray", high="red",midpoint=12,limits=c(4,20))+
+  geom_abline(intercept = 0,slope=1,linetype="dashed")+theme_classic()+
+  xlab("Theoretical assemblage biomass (mg C)")+
+  ylab("Actual assemblage biomass (mg C)")+xlim(0,5.5)+ylim(0,5.5)+
+  theme(text =element_text(size=20))+
+  theme(legend.position="none")
+community.growth
+
+growth.compare$boltz.temp<-1/((growth.compare$Temperature+273)*Boltz)
+
+t.test(growth.compare$community.growth,growth.compare$monoculture.growth,paired=TRUE)
+growth.compare$ratio<-growth.compare$community.growth/growth.compare$monoculture.growth
+
+growth.c<-lm(log(ratio)~boltz.temp,data=growth.compare)
+anova(growth.c)
+summary(growth.c)
+
+### N
+
+mono$n.mdl<-mono$total.n.mg
+mono[is.na(mono$n.mdl),"n.mdl"]<-min(mono$n.mdl,na.rm=TRUE)/4
+
+mono.n<-summarySE(mono,measurevar = "n.mdl",groupvars="Temperature",na.rm=TRUE)
+community.n<-summarySE(community,measurevar = "total.n.mg",groupvars="Temperature",na.rm=TRUE)
+names(mono.n)[names(mono.n) == "n.mdl"] <- "monoculture.n"
+names(community.n)[names(community.n) == "total.n.mg"] <- "community.n"
+
+n.compare<-merge(community.n,mono.n,by="Temperature") 
+
+### P
+mono$p.mdl<-mono$total.p.mg
+mono[is.na(mono$p.mdl),"p.mdl"]<-min(mono$p.mdl,na.rm=TRUE)/4
+
+mono.p<-summarySE(mono,measurevar = "p.mdl",groupvars="Temperature",na.rm=TRUE)
+community.p<-summarySE(community,measurevar = "total.p.mg",groupvars="Temperature",na.rm=TRUE)
+names(mono.p)[names(mono.p) == "p.mdl"] <- "monoculture.p"
+names(community.p)[names(community.p) == "total.p.mg"] <- "community.p"
+
+p.compare<-merge(community.p,mono.p,by="Temperature") 
+
+#### CUE
+CUE.mono<-CUE[CUE$species_name!="Community",]
+
+mono.cue.use<-summarySE(CUE.mono,measurevar ="DOC.consumed.mg",groupvars="Temperature" ,na.rm=TRUE)
+mono.cue.biomass<-summarySE(CUE.mono,measurevar ="total.c.mg",groupvars="Temperature" ,na.rm=TRUE)
+mono.cue<-merge(mono.cue.use,mono.cue.biomass,by="Temperature")
+mono.cue$mono.cue<-mono.cue$total.c.mg/mono.cue$DOC.consumed.mg
+
+community.cue<-summarySE(CUE[CUE$species_name=="Community",],measurevar ="aprox.CUE",groupvars="Temperature")
+
+compare.cue<-merge(mono.cue,community.cue,by="Temperature")
+
+compare.cue$boltz.temp<-1/((compare.cue$Temperature+273)*Boltz)
+
+t.test(compare.cue$mono.cue,compare.cue$aprox.CUE,paired=TRUE)
+
+cue.model<-lm(log(cue.ratio)~boltz.temp,data=compare.cue)
+anova(cue.model)
+summary(cue.model)
+
+### stoich.compare
+
+compare1<-merge(growth.compare,n.compare,by="Temperature")
+compare2<-merge(compare1,p.compare,by="Temperature")
+
+compare2$community.cn<-compare2$community.growth/compare2$community.n
+compare2$monoculture.cn<-compare2$monoculture.growth/compare2$monoculture.n
+
+compare2$community.cp<-compare2$community.growth/compare2$community.p
+compare2$monoculture.cp<-compare2$monoculture.growth/compare2$monoculture.p
+
+community.cp<-ggplot(compare2,aes(x=monoculture.cp,y=community.cp,color=Temperature))+geom_point(size=6)+
+  geom_abline(intercept = 0,slope=1,linetype="dashed")+theme_classic()+
+  scale_color_gradient2(low="navy", mid="gray", high="red",midpoint=12,limits=c(4,20))+
+  xlab("Theoretical assemblage C:P")+
+  ylab("Actual assemblage C:P")+
+  theme(text =element_text(size=20))+
+  xlim(20,300)+ylim(20,300)+
+  theme(legend.position="none")
+community.cp
+
+compare2$boltz.temp<-1/((compare2$Temperature+1)*Boltz)
+
+t.test(compare2$monoculture.cp,compare2$community.cp,paired=TRUE)
+compare2$cp.ratio<-compare2$community.cp/compare2$monoculture.cp
+
+cp.model<-lm(cp.ratio~boltz.temp,compare2)
+anova(cp.model)
+summary(cp.model)
+
+community.cn<-ggplot(compare2,aes(x=monoculture.cn,y=community.cn,color=Temperature))+geom_point(size=6)+
+  geom_abline(intercept = 0,slope=1,linetype="dashed")+theme_classic()+
+  scale_color_gradient2(low="navy", mid="gray", high="red",midpoint=12,limits=c(4,20))+
+  xlab("Theoretical assemblage C:N")+
+  ylab("Actual assemblage C:N")+
+  theme(text =element_text(size=20))+
+  ylim(1,11)+xlim(1,11)+
+  theme(legend.position=c(0.85,0.25))
+community.cn
+
+t.test(compare2$community.cn,compare2$monoculture.cn,paired=TRUE)
+compare2$cn.ratio<-compare2$community.cn/compare2$monoculture.cn
+cn.model<-lm(cn.ratio~boltz.temp,compare2)
+anova(cn.model)
+summary(cn.model)
+
+community.cue.plot<-ggplot(compare.cue,aes(x=mono.cue,y=aprox.CUE,color=Temperature))+geom_point(size=6)+
+  geom_abline(intercept = 0,slope=1,linetype="dashed")+theme_classic()+
+  scale_color_gradient2(low="navy", mid="gray", high="red",midpoint=12,limits=c(4,20))+
+  xlab("Theoretical assemblage CUE")+
+  ylab("Actual assemblage CUE")+
+  theme(text =element_text(size=20))+
+  ylim(0,1)+xlim(0,1)+
+  theme(legend.position="none")
+community.cue.plot
+
+t.test(compare.cue$mono.cue,compare.cue$aprox.CUE,paired=TRUE) ## community more effecient than monoculutre
+compare.cue$ratio<-compare.cue$aprox.CUE/compare.cue$mono.cue
+anova(lm(ratio~Temperature,compare.cue))
+
+### C isotoes
+
+c.iso.com<-summarySE(community,measurevar = "delta.13.C",groupvars = "Temperature")
+c.iso.mono<-summarySE(mono,measurevar = "delta.13.C",groupvars = "Temperature",na.rm=TRUE)
+
+names(c.iso.mono)[names(c.iso.mono) == "delta.13.C"] <- "monoculture.isotopes"
+names(c.iso.com)[names(c.iso.com) == "delta.13.C"] <- "community.isotopes"
+
+iso.compare<-merge(c.iso.com,c.iso.mono,by="Temperature") 
+
+community.iso.plot<-ggplot(iso.compare,aes(x=monoculture.isotopes,y=community.isotopes,color=Temperature))+geom_point(size=6)+
+  geom_abline(intercept = 0,slope=1,linetype="dashed")+theme_classic()+
+  scale_color_gradient2(low="navy", mid="gray", high="red",midpoint=12,limits=c(4,20))+
+  ylab(expression("Actual assemblage "*delta^13*"C"))+
+  xlab(expression("Theoretical assemblage "*delta^13*"C"))+
+  theme(text =element_text(size=20))+
+  theme(legend.position="none")+xlim(-23,-27)+ylim(-23,-27)
+community.iso.plot
+
+iso.compare$boltz.temp<-1/((iso.compare$Temperature+273)*Boltz)
+t.test(iso.compare$community.isotopes,iso.compare$monoculture.isotopes,paired=TRUE)
+
+
+iso.compare$ratio<-iso.compare$community.isotopes/iso.compare$monoculture.isotopes
+iso<-lm(ratio~boltz.temp,iso.compare)
+anova(iso)
+summary(iso)
+
+tiff(filename="./figures/community_comparison.tiff",units="in",res=600,width=12,height=16,compression="lzw")
+plot_grid(community.growth,community.cue.plot,community.cp,community.cn,community.iso.plot,labels="AUTO",ncol = 2,label_x=0.95,label_y=0.95,label_size = 20,align=T)
+dev.off()
+
+
+
+##### Accrual vs. C isotopes
+
+plot(d$total.c.mg,d$delta.13.C)
+
+delta.biomass<-ggplot(d,aes(x=total.c.mg,y=delta.13.C))+geom_point()+theme_classic()+
+  geom_smooth(method="lm",se=FALSE,size=2)+
+  geom_hline(yintercept = mean(substrate$delta.13.C),linetype="dashed",size=2)+
+  xlab("Biomass accrual (mg C)")+ylab(expression("Biomass "*delta^13*"C"))+
+  theme(text =element_text(size=20))
+
+tiff(filename="./figures/biomass.vs.isotopes.tiff",units="in",res=600,width=6,height=6,compression="lzw")
+delta.biomass
+dev.off()
+
+
+c_iso_plot<-ggplot(d,aes(x=total.c.mg,y=delta.13.C,color=species_name))+
+  theme_classic()+
+  geom_point(size=5,aes(color=species_name,shape=species_name))+
+  #scale_x_continuous(sec.axis=sec_axis(~1/(Boltz*(273+12))-1/((.+273)*Boltz),
+  #                                     name=expression("Standardized temperature "*"(1/["*italic("kT")[12]-italic(kT) *"])")))+
+  scale_colour_manual(values=cbp1,name = expression(""),
+                      labels = c(expression(italic("A. tetracladia")), 
+                                 expression(italic("H. chaetocladia")),
+                                 expression(italic("Flagellospora ")*"sp."),
+                                 expression(italic("A. penicillioides")),
+                                 "4-species assemblage"))+
+  scale_shape_manual(values=c(15, 16, 17,2,1),name = expression(""),
+                     labels = c(expression(italic("A. tetracladia")), 
+                                expression(italic("H. chaetocladia")),
+                                expression(italic("Flagellospora ")*"sp."),
+                                expression(italic("A. penicillioides")),
+                                "4-species assemblage"))+
+  #scale_colour_manual(values=cbp1)+
+  #scale_shape_manual(values=c(15, 16, 17,2,1))+
+  #xlab(expression("Temperature (1/kT"[0]-1/kT*")"))+
+  xlab("Biomass accrual (mg)")+
+  #xlab("")+
+  ylab(expression(delta^13*"C"))+
+  theme(text =element_text(size=20))+
+  theme(legend.position = c(0.25,0.2))+
+  #theme(legend.position = "none")+
+  geom_smooth(method="lm",se=FALSE)+
+  geom_hline(yintercept = mean(substrate$delta.13.C),linetype="dashed",size=2)
+c_iso_plot
+
+
+model<-lm(delta.13.C~total.c.mg,data=d)
+anova(model)
+summary(model)
+
+model_HC<-lm(delta.13.C~total.c.mg,data=d[d$species_name=="Hydrocina chaectocladia",])
+summary(model_HC)
+
+model_HC<-lm(delta.13.C~total.c.mg,data=d[d$species_name=="Hydrocina chaectocladia",])
+summary(model_HC)
+
+model_HC<-lm(delta.13.C~total.c.mg,data=d[d$species_name=="Hydrocina chaectocladia",])
+summary(model_HC)
+
+model_HC<-lm(delta.13.C~total.c.mg,data=d[d$species_name=="Hydrocina chaectocladia",])
+summary(model_HC)
+
+model_comm<-lm(delta.13.C~total.c.mg,data=d[d$species_name=="Aquanectria penicilloiides",])
+summary(model_comm)
+
+model_2<-lm(delta.13.C~total.c.mg*Temperature,data=d)
+summary(model_2)
+anova(model_2)
